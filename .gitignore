@@ -1,0 +1,22 @@
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local environment overrides — never commit
+.env
+.env.local
+*.env.local
+
+# Terraform state — managed remotely
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+# Helm rendered output
+*.tgz
+
+# kubeconfig
+kubeconfig
+*.kubeconfig
