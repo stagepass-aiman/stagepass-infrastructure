@@ -1,0 +1,56 @@
+# =============================================================================
+# kafka-alerts.yml — Kafka health alert rules
+#
+# NFR-REL-007: Every Kafka topic has a DLQ topic. Prometheus alert fires when
+# DLQ depth > 0 for > 5 min. DLQ topic naming: <original-topic>.dlq
+# =============================================================================
+
+groups:
+  - name: kafka.dlq
+    rules:
+      - alert: KafkaDLQNonEmpty
+        expr: |
+          kafka_consumergroup_lag{topic=~".*\\.dlq"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          tier:     "platform"
+        annotations:
+          summary:     "DLQ topic {{ $labels.topic }} has {{ $value }} unprocessed messages"
+          description: |
+            Consumer group {{ $labels.consumergroup }} has not drained DLQ topic
+            {{ $labels.topic }} for more than 5 minutes. This indicates a poison
+            pill message or a downstream service failure.
+            Runbook: https://github.com/stagepass-aiman/stagepass-docs/blob/main/docs/runbooks/kafka-dlq-non-empty.md
+          value:       "{{ $value }} messages"
+
+      - alert: KafkaConsumerLagHigh
+        expr: |
+          kafka_consumergroup_lag{topic!~".*\\.dlq"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+          tier:     "platform"
+        annotations:
+          summary:     "Consumer group {{ $labels.consumergroup }} lag is {{ $value }} on {{ $labels.topic }}"
+          description: |
+            Consumer group {{ $labels.consumergroup }} is more than 1000 messages
+            behind on topic {{ $labels.topic }}. This may indicate a service slowdown
+            or a deployment issue.
+          value:       "{{ $value }} messages behind"
+
+  - name: kafka.broker
+    rules:
+      - alert: KafkaBrokerDown
+        expr: |
+          up{job="kafka"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          tier:     "platform"
+        annotations:
+          summary:     "Kafka broker is unreachable"
+          description: |
+            Kafka exporter cannot reach the Kafka broker. All saga operations
+            will fail. Immediate investigation required.
+            Runbook: https://github.com/stagepass-aiman/stagepass-docs/blob/main/docs/runbooks/kafka-broker-down.md

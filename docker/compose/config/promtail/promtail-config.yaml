@@ -1,0 +1,53 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Collect all Docker container logs.
+  # Label each log stream with the container name and compose service name.
+  # NFR-OBS-001: structured JSON logs with correlation IDs.
+  # Loki labels are used for log stream routing; correlation IDs (traceId,
+  # bookingId) are parsed at query time from the JSON body.
+  - job_name: docker-containers
+    docker_sd_configs:
+      - host: unix:///run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name:   label
+            values: ["com.docker.compose.project=stagepass"]
+    relabel_configs:
+      # Use the Docker Compose service name as the Loki 'service' label
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label:  service
+      # Use the container name as an additional label for debugging
+      - source_labels: [__meta_docker_container_name]
+        regex:         "/(.*)"
+        target_label:  container
+      # Add the project (compose name) as a label
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label:  compose_project
+
+    pipeline_stages:
+      # Attempt to parse the log line as JSON.
+      # All StagePass services emit structured JSON logs (NFR-OBS-001).
+      # Infrastructure components (Postgres, Redis, etc.) emit plain text —
+      # those will have the raw line in the 'message' field after this stage.
+      - json:
+          expressions:
+            level:     level
+            traceId:   traceId
+            spanId:    spanId
+            bookingId: bookingId
+            eventId:   eventId
+            userId:    userId
+            service:   service
+      # Promote traceId to a Loki label so Grafana can correlate with Jaeger
+      - labels:
+          level:    ""
+          traceId:  ""
