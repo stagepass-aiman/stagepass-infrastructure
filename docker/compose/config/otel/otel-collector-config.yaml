@@ -1,0 +1,105 @@
+# =============================================================================
+# otel-collector-config.yaml — OpenTelemetry Collector pipeline configuration
+#
+# WHY THIS EXISTS:
+#   NFR-OBS-003: all services emit OTel traces; context propagated across
+#   HTTP, gRPC, and Kafka. The OTel Collector is the single ingestion point
+#   for all telemetry — it receives spans and metrics from every service,
+#   processes them (batching, attribute enrichment), and routes them to
+#   the appropriate backends (Jaeger for traces, Prometheus for metrics).
+#
+#   Using a Collector rather than direct-to-backend exporting means:
+#   1. Services don't need to know which backend is in use
+#   2. Batching reduces per-request overhead
+#   3. The pipeline can be changed (e.g., add Elastic APM in Phase 9)
+#      without touching service code
+#
+# PIPELINE:
+#   Receivers:  OTLP gRPC (4317) + OTLP HTTP (4318)
+#   Processors: batch, resource detection, memory limiter
+#   Exporters:  Jaeger (traces), Prometheus (metrics)
+# =============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+  # Scrape the Collector's own metrics for self-monitoring
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "otel-collector"
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["0.0.0.0:8888"]
+
+processors:
+  # Memory limiter must be first in the pipeline — prevents OOM under load.
+  # Soft limit: start dropping at 75% of max; hard limit: 80%.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200       # 200 MB hard limit — consistent with 256 MB container budget
+    spike_limit_mib: 40  # Allow 40 MB burst above steady state
+
+  # Batch processor: accumulates spans/metrics before exporting.
+  # Reduces Jaeger write pressure. Timeout of 1s balances latency vs throughput.
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Attach standard resource attributes to all telemetry.
+  # Services declare their own service.name via SDK; this adds environment info.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: "local"
+        action: upsert
+
+exporters:
+  # Jaeger — receives traces via Jaeger's native gRPC protocol (not OTLP).
+  # Jaeger all-in-one listens on 14250 for model.proto (Jaeger native gRPC).
+  otlp/jaeger:
+    endpoint: "jaeger:4317"
+    tls:
+      insecure: true
+
+  # Prometheus — exposes a /metrics endpoint that Prometheus scrapes.
+  # The Collector acts as a Prometheus exporter for application metrics
+  # received via OTLP from services that emit metrics (not all will in Phase 2).
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "stagepass"
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Debug exporter — logs sampled telemetry to stdout.
+  # Useful during Phase 2–3 bring-up. Disable in Phase 7+ to reduce noise.
+  debug:
+    verbosity: basic
+    sampling_initial: 2
+    sampling_thereafter: 500
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    traces:
+      receivers:  [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters:  [otlp/jaeger, debug]
+    metrics:
+      receivers:  [otlp, prometheus]
+      processors: [memory_limiter, resource, batch]
+      exporters:  [prometheus]
+
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+  pprof:
+    endpoint: "0.0.0.0:1777"
+  zpages:
+    endpoint: "0.0.0.0:55679"

@@ -1,0 +1,58 @@
+# =============================================================================
+# datasources.yaml — Grafana datasource auto-provisioning
+#
+# Grafana loads this file at startup. Datasources are created automatically —
+# no manual "Add datasource" step needed. This ensures a reproducible
+# observability stack: any developer who runs docker compose up gets a
+# fully wired Grafana immediately.
+#
+# NFR-OBS-004: given a bookingId, find every log and span across all services
+# in under 2 minutes using Grafana + Jaeger. The Loki ↔ Jaeger correlation
+# (via traceId field in structured logs) and the Jaeger datasource together
+# make this possible.
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+
+  - name:      Prometheus
+    type:      prometheus
+    access:    proxy
+    url:       http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod:          POST
+      exemplarTraceIdDestinations:
+        # Clicking a trace ID in Prometheus exemplars jumps to Jaeger.
+        - name:            traceID
+          datasourceUid:   jaeger
+
+  - name:      Loki
+    type:      loki
+    access:    proxy
+    url:       http://loki:3100
+    jsonData:
+      derivedFields:
+        # Extract traceId from structured log lines and create a clickable
+        # link to the corresponding Jaeger trace. This is the mechanism behind
+        # NFR-OBS-004 — "find every log and span in under 2 minutes".
+        - name:          TraceID
+          matcherRegex:  '"traceId":"(\w+)"'
+          url:           '$${__value.raw}'
+          datasourceUid: jaeger
+
+  - name:      Jaeger
+    uid:       jaeger
+    type:      jaeger
+    access:    proxy
+    url:       http://jaeger:16686
+    jsonData:
+      tracesToLogs:
+        # Clicking a trace in Jaeger shows correlated logs from Loki.
+        datasourceUid: loki
+        filterByTraceID: true
+        filterBySpanID: false
+        tags:
+          - key:   service.name
+            value: service
