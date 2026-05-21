@@ -56,6 +56,45 @@ create_topic "event.published"       3  2592000000
 create_topic "event.cancelled"       3  2592000000
 create_topic "venue.suspended"       3  604800000
 
+# ── Event Service topics (Phase 3) ──────────────────────────────────────────
+# event.events consolidates all event domain messages (created, published,
+# cancelled, postponed) into one topic. Consumers filter by message type.
+# 12 partitions: higher than other topics — event publishing is the entry
+# point for Search Service indexing (NFR-PERF-010: indexed within 30s).
+# NOTE: event.published and event.cancelled above are superseded by
+# event.events but kept for backward compatibility.
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "event.events" \
+  --partitions 12 \
+  --replication-factor 1 \
+  --config retention.ms=2592000000   # 30 days — replay source for Search Service
+
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "event.events.dlq" \
+  --partitions 12 \
+  --replication-factor 1 \
+  --config retention.ms=1209600000   # 14 days
+
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "event.commands" \
+  --partitions 12 \
+  --replication-factor 1 \
+  --config retention.ms=604800000    # 7 days
+
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "event.commands.dlq" \
+  --partitions 12 \
+  --replication-factor 1 \
+  --config retention.ms=1209600000   # 14 days
+
 echo "[kafka-init] All topics created."
 echo "[kafka-init] Phase 2 init complete."
 echo "[kafka-init] NOTE: SASL/SCRAM deferred to Phase 3. THR-PLAT-01 tracked."
