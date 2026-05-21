@@ -942,3 +942,89 @@ services:
       timeout:  10s
       retries:  10
       start_period: 120s
+
+  # ===========================================================================
+  # AUTH SERVICE — Phase 3
+  # Spring Boot 3 + Java 21 — T1 service (99.9% SLO)
+  # Database: auth_db on shared postgres (auth_user — CONNECT to auth_db only)
+  # Cache:    Redis DB 0 (JTI blocklist + rate-limit counters)
+  # Memory:   512 MB (NFR §5.4 T1 allocation)
+  # ===========================================================================
+  auth-service:
+    build:
+      context: ../../../stagepass-auth-service
+      dockerfile: Dockerfile
+    image: stagepass-auth-service:local
+    container_name: auth-service
+    restart: unless-stopped
+    profiles: [infra]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SERVER_PORT: 8081
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/auth_db
+      SPRING_DATASOURCE_USERNAME: auth_user
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_AUTH_PASSWORD}
+      SPRING_DATA_REDIS_HOST:     redis
+      SPRING_DATA_REDIS_PORT:     6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SPRING_DATA_REDIS_DATABASE: 0
+      AUTH_RSA_PRIVATE_KEY: ${AUTH_RSA_PRIVATE_KEY}
+      AUTH_RSA_PUBLIC_KEY:  ${AUTH_RSA_PUBLIC_KEY}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    networks:
+      - stagepass-net
+    mem_limit: 512m
+    mem_reservation: 256m
+
+  # ===========================================================================
+  # EVENT SERVICE — Phase 3
+  # NestJS 10 + TypeScript — T2 service (99.5% SLO)
+  # Database: event_db on shared mongodb (event_user — readWrite on event_db only)
+  # Kafka:    producer on event.events topic (kafka:9092 internal listener)
+  # JWKS:     fetched from auth-service at startup — depends_on auth-service healthy
+  # Memory:   256 MB (NFR §5.4 T2 Node.js allocation)
+  # ===========================================================================
+  event-service:
+    build:
+      context: ../../../stagepass-event-service
+      dockerfile: Dockerfile
+    image: stagepass-event-service:local
+    container_name: event-service
+    restart: unless-stopped
+    profiles: [infra]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    ports:
+      - "8082:8082"
+    environment:
+      PORT:            8082
+      NODE_ENV:        docker
+      MONGODB_URI:     mongodb://event_user:${MONGO_EVENT_PASSWORD}@mongodb:27017/event_db
+      MONGODB_DB_NAME: event_db
+      KAFKA_BROKERS:   kafka:9092
+      KAFKA_CLIENT_ID: event-service
+      KAFKA_GROUP_ID:  event-service-group
+      # auth-service is reachable by container name within stagepass-net
+      JWKS_URI:        http://auth-service:8081/auth/jwks
+    networks:
+      - stagepass-net
+    mem_limit: 256m
+    mem_reservation: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/health/live | grep -q UP"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
