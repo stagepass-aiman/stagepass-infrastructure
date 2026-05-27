@@ -4,6 +4,9 @@
 #
 # SASL/SCRAM deferred to Phase 3. See commit message for rationale.
 # This script only creates topics. ACLs will be added in Phase 3.
+#
+# CHANGELOG:
+#   Phase 4 — Added venue.events and venue.events.dlq (Venue Service Outbox).
 # =============================================================================
 set -euo pipefail
 
@@ -95,6 +98,39 @@ kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
   --replication-factor 1 \
   --config retention.ms=1209600000   # 14 days
 
+# ── Venue Service topics (Phase 4) ──────────────────────────────────────────
+# venue.events carries all Venue domain messages: VenueCreated, VenueUpdated,
+# VenueSuspended, VenueBookingAccepted, VenueBookingRejected.
+# Published via Transactional Outbox pattern (NFR-REL-005) — guaranteed
+# at-least-once delivery. Consumers must be idempotent (NFR-REL-002).
+#
+# 6 partitions: venue write volume is lower than booking/event domains.
+# Partition key: venueId — all events for one venue land on the same
+# partition, preserving per-venue ordering (e.g. VenueCreated before
+# VenueSuspended for the same venueId).
+#
+# 30 day retention: VenueBookingAccepted carries the venueRevenueSharePercentage
+# that the Disbursement Service uses to compute RevenueSplit records.
+# Sufficient retention allows Disbursement to replay if it misses an event.
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "venue.events" \
+  --partitions 6 \
+  --replication-factor 1 \
+  --config retention.ms=2592000000   # 30 days
+
+# venue.events.dlq — NFR-REL-007: every topic must have a DLQ.
+# Prometheus alert fires when DLQ depth > 0 for > 5 minutes.
+# 14 day retention: enough time to inspect, fix, and replay failed events.
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "venue.events.dlq" \
+  --partitions 6 \
+  --replication-factor 1 \
+  --config retention.ms=1209600000   # 14 days
+
 echo "[kafka-init] All topics created."
-echo "[kafka-init] Phase 2 init complete."
+echo "[kafka-init] Phase 4 init complete."
 echo "[kafka-init] NOTE: SASL/SCRAM deferred to Phase 3. THR-PLAT-01 tracked."

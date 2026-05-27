@@ -3,92 +3,31 @@
 #
 # Repo:    stagepass-infrastructure
 # Path:    /docker/compose/docker-compose.yml
-# Version: 0.1.0
-# Status:  Phase 2 — Local Infrastructure Bootstrap
+# Version: 0.3.0
+# Status:  Phase 4 — Venue Service Integration
 #
-# PROFILES:
-#   --profile infra       All infrastructure services (default for development)
-#   --profile ci          SonarQube (on-demand quality analysis — NOT in infra)
-#
-# WHY SONARQUBE IS NOT IN --profile infra:
-#   SonarQube requires ~1.2–1.5 GB RAM. NFR-PERF-043 caps the full stack
-#   (17 services + infra) at 12 GB. Running SonarQube alongside all Phase 4
-#   services leaves < 500 MB headroom — below safe operating margin.
-#   SonarQube runs on-demand during CI analysis, not as a persistent dev service.
-#   This matches real-world usage: SonarQube runs on a dedicated CI server, not
-#   developer laptops.
-#
-# DATABASE ISOLATION MODEL:
-#   - PostgreSQL: one container, 8 per-service databases.
-#     Isolation enforced by per-service PostgreSQL users with CONNECT granted
-#     only to their own database. Cross-database access requires postgres
-#     superuser credentials — never issued to any service.
-#   - MongoDB: one container, 3 per-service databases.
-#     Isolation enforced by MongoDB createUser with db-scoped readWrite role.
-#   - Redis: one container, 7 logical databases (SELECT 0–6).
-#     ⚠️ IMPORTANT: Redis logical databases share the same password and memory.
-#     This is NOT a security boundary — it is organisational separation for
-#     local dev only. Production uses separate Redis clusters per purpose.
-#     Services know only their own DB index (injected via Vault secret).
-#
-# KAFKA SECURITY — THR-PLAT-01 (STRIDE §8) PHASE 2 GATE BLOCKER:
-#   SASL/SCRAM-SHA-512 is configured on the broker.
-#   Per-service SCRAM credentials and topic ACLs are provisioned by
-#   kafka-init after the broker is healthy.
-#   Without this, any pod in the cluster can inject arbitrary Kafka events,
-#   including fraudulent payment.events that would trigger booking confirmation
-#   without actual payment.
-#
-# SECRETS:
-#   All passwords are read from environment variables, which in turn are sourced
-#   from .env.local (gitignored). In Phase 9, Vault Agent Injector replaces
-#   .env.local entirely. Never commit .env.local.
-#   See .env.local.example for required variable names.
-#
-# MEMORY BUDGET (NFR-PERF-043 — hard ceiling: 12 GB):
-#   Infra-only (Phase 2, no services): ~4.2 GB
-#   Phase 3 (+6 services):             ~7.0 GB
-#   Phase 4 (+12 services total):      ~9.5 GB
-#   Phase 5 (+17 services total):     ~11.3 GB
-#   Verified by: scripts/check-memory.sh
-#
-# USAGE:
-#   # Start all infrastructure
-#   docker compose --profile infra up -d
-#
-#   # Start SonarQube for a quality scan
-#   docker compose --profile ci up -d sonarqube
-#
-#   # Verify health
-#   docker compose --profile infra ps
-#
-#   # Check RAM usage
-#   ./scripts/check-memory.sh
+# CHANGELOG:
+#   0.3.0 — Replace mongo-rs-init sidecar with embedded startup script.
+#            Sidecar container with condition: service_healthy hangs
+#            permanently on Windows Docker Desktop (RULE-31). Fix: mount
+#            mongo-entrypoint.sh into the MongoDB container — it generates
+#            the keyFile, polls until mongod is ready, then calls rs.initiate().
+#            Remove mongo-rs-init service and its dependency from all services.
+#   0.2.0 — Add Venue Service. Upgrade MongoDB to single-node replica set.
+#   0.1.0 — Phase 2 baseline.
 # =============================================================================
 
 name: stagepass
 
-# =============================================================================
-# NETWORKS
-# =============================================================================
 networks:
-  # Primary application network — all services attach here
   stagepass-net:
     driver: bridge
     ipam:
       config:
         - subnet: 172.20.0.0/16
-
-  # Observability network — isolated from application traffic
-  # Prometheus, Grafana, Loki, Jaeger communicate here without
-  # reaching application databases directly
   observability-net:
     driver: bridge
 
-# =============================================================================
-# VOLUMES — named volumes ensure data survives container restarts
-# Deleted only by: docker compose down -v (explicit intent required)
-# =============================================================================
 volumes:
   postgres-data:
     name: stagepass_postgres_data
@@ -127,16 +66,9 @@ volumes:
   sonarqube-postgres-data:
     name: stagepass_sonarqube_postgres_data
 
-# =============================================================================
-# SERVICES
-# =============================================================================
 services:
-
   # ===========================================================================
-  # POSTGRESQL — shared container, 8 per-service databases
-  # Image: postgres:16-alpine (smaller footprint than debian variant)
-  # Memory: 512 MB (NFR §5.4)
-  # Init: /docker-entrypoint-initdb.d/ scripts run once on first start
+  # POSTGRESQL
   # ===========================================================================
   postgres:
     image: postgres:16-alpine
@@ -144,21 +76,19 @@ services:
     restart: unless-stopped
     profiles: [infra]
     environment:
-      POSTGRES_USER:     postgres
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
-      POSTGRES_DB:       postgres
-      # Per-service passwords — injected from .env.local, come from Vault in Phase 9
-      POSTGRES_AUTH_PASSWORD:         ${POSTGRES_AUTH_PASSWORD}
-      POSTGRES_SEAT_PASSWORD:         ${POSTGRES_SEAT_PASSWORD}
-      POSTGRES_BOOKING_PASSWORD:      ${POSTGRES_BOOKING_PASSWORD}
-      POSTGRES_PAYMENT_PASSWORD:      ${POSTGRES_PAYMENT_PASSWORD}
+      POSTGRES_DB: postgres
+      POSTGRES_AUTH_PASSWORD: ${POSTGRES_AUTH_PASSWORD}
+      POSTGRES_SEAT_PASSWORD: ${POSTGRES_SEAT_PASSWORD}
+      POSTGRES_BOOKING_PASSWORD: ${POSTGRES_BOOKING_PASSWORD}
+      POSTGRES_PAYMENT_PASSWORD: ${POSTGRES_PAYMENT_PASSWORD}
       POSTGRES_DISBURSEMENT_PASSWORD: ${POSTGRES_DISBURSEMENT_PASSWORD}
-      POSTGRES_TICKET_PASSWORD:       ${POSTGRES_TICKET_PASSWORD}
-      POSTGRES_CHECKIN_PASSWORD:      ${POSTGRES_CHECKIN_PASSWORD}
-      POSTGRES_FRAUD_PASSWORD:        ${POSTGRES_FRAUD_PASSWORD}
+      POSTGRES_TICKET_PASSWORD: ${POSTGRES_TICKET_PASSWORD}
+      POSTGRES_CHECKIN_PASSWORD: ${POSTGRES_CHECKIN_PASSWORD}
+      POSTGRES_FRAUD_PASSWORD: ${POSTGRES_FRAUD_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      # Init scripts run in alphabetical order on first start
       - ./init/postgres/01-init-databases.sh:/docker-entrypoint-initdb.d/01-init-databases.sh:ro
     ports:
       - "5432:5432"
@@ -167,32 +97,44 @@ services:
     mem_limit: 512m
     mem_reservation: 256m
     healthcheck:
-      test:     ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 30s
-    # Run as postgres user (uid 999 in the official image) — non-root
-    # The postgres image already enforces this; no user: override needed.
 
   # ===========================================================================
-  # MONGODB — shared container, 3 per-service databases
-  # Memory: 512 MB (NFR §5.4)
+  # MONGODB — single-node replica set (rs0)
+  #
+  # PHASE 4: runs as replica set for Venue Service Outbox transactions.
+  #
+  # Startup is handled by the mounted mongo-entrypoint.sh which:
+  #   1. Generates a keyFile inside the container (required when auth +
+  #      replica set are both active — Windows-mounted files fail chmod 400).
+  #   2. Spawns a background poll loop that waits for mongod to accept
+  #      authenticated connections, then calls rs.initiate().
+  #   3. exec's the original docker-entrypoint.sh to preserve MONGO_INITDB_*
+  #      user creation and /docker-entrypoint-initdb.d/ script execution.
+  #
+  # WHY NOT A SIDECAR CONTAINER (RULE-31):
+  #   condition: service_healthy dependency propagation hangs permanently on
+  #   Windows Docker Desktop. Embedded script is the only reliable fix.
   # ===========================================================================
   mongodb:
     image: mongo:7.0
     container_name: stagepass-mongodb
     restart: unless-stopped
     profiles: [infra]
+    entrypoint: ["bash", "/init/mongo-entrypoint.sh"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: mongoadmin
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
-      # Per-service passwords for init script
-      MONGO_EVENT_PASSWORD:        ${MONGO_EVENT_PASSWORD}
-      MONGO_VENUE_PASSWORD:        ${MONGO_VENUE_PASSWORD}
+      MONGO_EVENT_PASSWORD: ${MONGO_EVENT_PASSWORD}
+      MONGO_VENUE_PASSWORD: ${MONGO_VENUE_PASSWORD}
       MONGO_BOOKING_READ_PASSWORD: ${MONGO_BOOKING_READ_PASSWORD}
     volumes:
       - mongodb-data:/data/db
+      - ./init/mongo/mongo-entrypoint.sh:/init/mongo-entrypoint.sh:ro
       - ./init/mongo/01-init-databases.js:/docker-entrypoint-initdb.d/01-init-databases.js:ro
     ports:
       - "27017:27017"
@@ -201,32 +143,16 @@ services:
     mem_limit: 512m
     mem_reservation: 256m
     healthcheck:
-      test:     ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 30s
-    # MongoDB 7.0 official image runs as mongodb user (uid 999) — non-root ✓
     security_opt:
       - no-new-privileges:true
 
   # ===========================================================================
-  # REDIS — shared container, 7 logical databases (SELECT 0–6)
-  #
-  # REDIS LOGICAL DATABASE ASSIGNMENTS:
-  #   DB 0: auth-cache      — JTI blocklist (sorted set + TTL), rate-limit counters
-  #   DB 1: seat-hold-cache — SETNX seat holds (NFR-REL-004: 10-min TTL)
-  #   DB 2: gateway-cache   — API Gateway rate-limit sliding window counters
-  #   DB 3: notification    — Socket.IO Redis adapter (pub/sub + room membership)
-  #   DB 4: waitlist-store  — sorted sets per eventId (ZADD/ZPOPMIN)
-  #   DB 5: recommendation  — inference output cache (5-min TTL per user)
-  #   DB 6: chatbot-cache   — conversation memory (last N turns per session)
-  #
-  # ⚠️  PRODUCTION DIVERGENCE: Redis logical databases share the same process
-  # and auth password. In production, each purpose maps to a separate
-  # ElastiCache cluster with separate credentials and VPC security groups.
-  # This is acceptable for Phase 2–9 local development.
-  # Memory: 256 MB total for all 7 logical databases (NFR §5.4)
+  # REDIS
   # ===========================================================================
   redis:
     image: redis:7.2-alpine
@@ -250,23 +176,17 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test:     ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
-      timeout:  5s
-      retries:  5
-    # Redis alpine image runs as redis user (uid 999) — non-root ✓
+      timeout: 5s
+      retries: 5
     user: "999:999"
     security_opt:
       - no-new-privileges:true
 
   # ===========================================================================
-  # ZOOKEEPER — required by Kafka (classic mode)
-  # Memory: 128 MB
-  # NOTE: Kafka KRaft (no ZooKeeper) is the modern approach but bitnami/kafka's
-  # SASL/SCRAM support is more mature and better documented in ZooKeeper mode.
-  # KRaft + SASL/SCRAM migration can be done in Phase 8 or Phase 9.
+  # ZOOKEEPER
   # ===========================================================================
-
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     container_name: stagepass-zookeeper
@@ -287,24 +207,18 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test: ["CMD-SHELL", "echo srvr | nc localhost 2181 | grep -q 'Zookeeper version'"]
+      test:
+        [
+          "CMD-SHELL",
+          "echo srvr | nc localhost 2181 | grep -q 'Zookeeper version'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
-    # bitnami images run as non-root by default (uid 1001) ✓
 
   # ===========================================================================
-  # KAFKA — SASL/SCRAM-SHA-512 enforced (THR-PLAT-01 Phase 2 gate blocker)
-  # Memory: 384 MB
-  #
-  # SECURITY: SASL_PLAINTEXT for local dev (plaintext inside Docker bridge
-  # network is acceptable — no external exposure). Phase 9 / Istio upgrades
-  # to mTLS (SASL_SSL or Istio service mesh encryption).
-  #
-  # LISTENERS:
-  #   INTERNAL — service-to-broker within Docker network (SASL_PLAINTEXT)
-  #   EXTERNAL — host machine access for tooling (SASL_PLAINTEXT, port 29092)
+  # KAFKA
   # ===========================================================================
   kafka:
     image: confluentinc/cp-kafka:7.6.1
@@ -339,12 +253,12 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 9092 || exit 1"]
       interval: 10s
-      timeout:  5s
-      retries:  10
+      timeout: 5s
+      retries: 10
       start_period: 60s
+
   # ===========================================================================
-  # KAFKA INIT — provisions SCRAM users and topic ACLs after broker is healthy
-  # This container runs to completion and exits 0. It is not a persistent service.
+  # KAFKA INIT
   # ===========================================================================
   kafka-init:
     image: confluentinc/cp-kafka:7.6.1
@@ -354,32 +268,30 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      KAFKA_ADMIN_PASSWORD:           ${KAFKA_ADMIN_PASSWORD}
-      KAFKA_BOOKING_PASSWORD:         ${KAFKA_BOOKING_PASSWORD}
-      KAFKA_PAYMENT_PASSWORD:         ${KAFKA_PAYMENT_PASSWORD}
-      KAFKA_SEAT_PASSWORD:            ${KAFKA_SEAT_PASSWORD}
-      KAFKA_TICKET_PASSWORD:          ${KAFKA_TICKET_PASSWORD}
-      KAFKA_NOTIFICATION_PASSWORD:    ${KAFKA_NOTIFICATION_PASSWORD}
-      KAFKA_FRAUD_PASSWORD:           ${KAFKA_FRAUD_PASSWORD}
-      KAFKA_WAITLIST_PASSWORD:        ${KAFKA_WAITLIST_PASSWORD}
-      KAFKA_EVENT_PASSWORD:           ${KAFKA_EVENT_PASSWORD}
-      KAFKA_VENUE_PASSWORD:           ${KAFKA_VENUE_PASSWORD}
-      KAFKA_DISBURSEMENT_PASSWORD:    ${KAFKA_DISBURSEMENT_PASSWORD}
-      KAFKA_ANALYTICS_PASSWORD:       ${KAFKA_ANALYTICS_PASSWORD}
-      KAFKA_SEARCH_PASSWORD:          ${KAFKA_SEARCH_PASSWORD}
-      KAFKA_RECOMMENDATION_PASSWORD:  ${KAFKA_RECOMMENDATION_PASSWORD}
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
+      KAFKA_BOOKING_PASSWORD: ${KAFKA_BOOKING_PASSWORD}
+      KAFKA_PAYMENT_PASSWORD: ${KAFKA_PAYMENT_PASSWORD}
+      KAFKA_SEAT_PASSWORD: ${KAFKA_SEAT_PASSWORD}
+      KAFKA_TICKET_PASSWORD: ${KAFKA_TICKET_PASSWORD}
+      KAFKA_NOTIFICATION_PASSWORD: ${KAFKA_NOTIFICATION_PASSWORD}
+      KAFKA_FRAUD_PASSWORD: ${KAFKA_FRAUD_PASSWORD}
+      KAFKA_WAITLIST_PASSWORD: ${KAFKA_WAITLIST_PASSWORD}
+      KAFKA_EVENT_PASSWORD: ${KAFKA_EVENT_PASSWORD}
+      KAFKA_VENUE_PASSWORD: ${KAFKA_VENUE_PASSWORD}
+      KAFKA_DISBURSEMENT_PASSWORD: ${KAFKA_DISBURSEMENT_PASSWORD}
+      KAFKA_ANALYTICS_PASSWORD: ${KAFKA_ANALYTICS_PASSWORD}
+      KAFKA_SEARCH_PASSWORD: ${KAFKA_SEARCH_PASSWORD}
+      KAFKA_RECOMMENDATION_PASSWORD: ${KAFKA_RECOMMENDATION_PASSWORD}
     volumes:
       - ./init/kafka/kafka-init.sh:/kafka-init.sh:ro
     command: ["bash", "/kafka-init.sh"]
     networks:
       - stagepass-net
-    restart: "no"   # One-shot init — do not restart on exit
+    restart: "no"
     mem_limit: 256m
 
   # ===========================================================================
-  # ELASTICSEARCH — single-node, discovery.type=single-node
-  # Primary store: Search Service (event index)
-  # Memory: 512 MB (heap: 256m per ES recommendation for heap = ~50% of container)
+  # ELASTICSEARCH
   # ===========================================================================
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
@@ -387,12 +299,11 @@ services:
     restart: unless-stopped
     profiles: [infra]
     environment:
-      discovery.type:             single-node
-      ES_JAVA_OPTS:               "-Xms256m -Xmx256m"
-      xpack.security.enabled:     "true"
-      xpack.security.http.ssl.enabled: "false"   # HTTP SSL off — TLS at Istio layer in Phase 9
-      ELASTIC_PASSWORD:           ${ELASTICSEARCH_PASSWORD}
-      # Required for single-node to allow yellow cluster status (no replicas)
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms256m -Xmx256m"
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      ELASTIC_PASSWORD: ${ELASTICSEARCH_PASSWORD}
       cluster.routing.allocation.disk.threshold_enabled: "false"
     volumes:
       - elasticsearch-data:/usr/share/elasticsearch/data
@@ -410,16 +321,18 @@ services:
         soft: 65536
         hard: 65536
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -u elastic:${ELASTICSEARCH_PASSWORD} http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf -u elastic:${ELASTICSEARCH_PASSWORD} http://localhost:9200/_cluster/health | grep -qE 'green|yellow'",
+        ]
       interval: 20s
-      timeout:  10s
-      retries:  15
+      timeout: 10s
+      retries: 15
       start_period: 120s
-    # Elasticsearch 8.x runs as elasticsearch user (uid 1000) — non-root ✓
 
   # ===========================================================================
-  # CLICKHOUSE — OLAP store for analytics time-series
-  # Memory: 256 MB
+  # CLICKHOUSE
   # ===========================================================================
   clickhouse:
     image: clickhouse/clickhouse-server:24.4-alpine
@@ -427,32 +340,31 @@ services:
     restart: unless-stopped
     profiles: [infra]
     environment:
-      CLICKHOUSE_USER:     analytics_user
+      CLICKHOUSE_USER: analytics_user
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_DB:       analytics_db
+      CLICKHOUSE_DB: analytics_db
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     ports:
-      - "8123:8123"   # HTTP interface
-      - "9000:9000"   # Native TCP interface
+      - "8123:8123"
+      - "9000:9000"
     networks:
       - stagepass-net
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --query='SELECT 1' 2>/dev/null || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "clickhouse-client --query='SELECT 1' 2>/dev/null || exit 1",
+        ]
       interval: 10s
-      timeout:  10s
-      retries:  10
+      timeout: 10s
+      retries: 10
       start_period: 60s
-    # ClickHouse alpine runs as clickhouse user (uid 101) — non-root ✓
 
   # ===========================================================================
-  # QDRANT — vector database for Recommendation and Chatbot RAG
-  # Two collections will be created at service bring-up (not at infra level):
-  #   - event_embeddings   (Recommendation Service)
-  #   - chatbot_corpus     (Chatbot RAG)
-  # Memory: 256 MB
+  # QDRANT
   # ===========================================================================
   qdrant:
     image: qdrant/qdrant:v1.9.4
@@ -464,24 +376,25 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
     ports:
-      - "6333:6333"   # REST API
-      - "6334:6334"   # gRPC API
+      - "6333:6333"
+      - "6334:6334"
     networks:
       - stagepass-net
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333' 2>/dev/null || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'echo > /dev/tcp/localhost/6333' 2>/dev/null || exit 1",
+        ]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 20s
-    # Qdrant runs as qdrant user — non-root ✓
 
   # ===========================================================================
-  # MINIO — S3-compatible object storage
-  # Stores: event posters, venue photos, PDF ticket files
-  # Memory: 128 MB
+  # MINIO
   # ===========================================================================
   minio:
     image: minio/minio:RELEASE.2024-05-10T01-41-38Z
@@ -489,43 +402,28 @@ services:
     restart: unless-stopped
     profiles: [infra]
     environment:
-      MINIO_ROOT_USER:     ${MINIO_ROOT_USER}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      # Prometheus metrics endpoint (scraped by Prometheus)
       MINIO_PROMETHEUS_AUTH_TYPE: public
     command: server /data --console-address ":9001"
     volumes:
       - minio-data:/data
     ports:
-      - "9010:9000"   # S3 API (9010 on host — 9000 is taken by ClickHouse)
-      - "9011:9001"   # MinIO Console UI
+      - "9010:9000"
+      - "9011:9001"
     networks:
       - stagepass-net
     mem_limit: 128m
     mem_reservation: 64m
     healthcheck:
-      test:     ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 20s
-    # MinIO runs as non-root user ✓
 
   # ===========================================================================
-  # VAULT — HashiCorp Vault in dev mode
-  #
-  # WHY DEV MODE IN PHASE 2:
-  #   Vault dev mode starts unsealed, stores everything in memory, and provides
-  #   a root token. This is acceptable for Phase 2–3 local development where
-  #   the goal is to establish the pattern of reading secrets from Vault, not
-  #   to operate Vault securely. Phase 9 transitions to production mode with
-  #   auto-unseal via AWS KMS.
-  #
-  # ⚠️  NEVER USE DEV MODE IN STAGING OR PRODUCTION.
-  #
-  # Placeholder secrets are seeded by vault-init after startup.
-  # All service environment variables that would normally come from Vault
-  # are documented in .env.local.example.
+  # VAULT
   # ===========================================================================
   vault:
     image: hashicorp/vault:1.16
@@ -533,11 +431,11 @@ services:
     restart: unless-stopped
     profiles: [infra]
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID:     ${VAULT_DEV_ROOT_TOKEN}
-      VAULT_DEV_LISTEN_ADDRESS:    "0.0.0.0:8200"
-      VAULT_LOG_LEVEL:             info
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_LOG_LEVEL: info
     cap_add:
-      - IPC_LOCK   # Required by Vault to prevent secret swapping to disk
+      - IPC_LOCK
     volumes:
       - vault-data:/vault/data
     ports:
@@ -547,22 +445,18 @@ services:
     mem_limit: 128m
     mem_reservation: 64m
     healthcheck:
-      test:     ["CMD-SHELL", "vault status -address=http://localhost:8200 | grep -q 'Sealed.*false'"]
+      test:
+        [
+          "CMD-SHELL",
+          "vault status -address=http://localhost:8200 | grep -q 'Sealed.*false'",
+        ]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 20s
-    # Vault container runs as vault user (uid 100) — non-root ✓
 
   # ===========================================================================
-  # ─── OBSERVABILITY STACK ────────────────────────────────────────────────────
-  # All observability services are included in --profile infra because the
-  # Phase 2 DoD requires Prometheus scrape targets and Grafana dashboards.
-  # ===========================================================================
-
-  # ===========================================================================
-  # PROMETHEUS — metrics collection and alerting
-  # Memory: 256 MB
+  # OBSERVABILITY STACK
   # ===========================================================================
   prometheus:
     image: prom/prometheus:v2.52.0
@@ -573,7 +467,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=15d"
-      - "--web.enable-lifecycle"          # Allow config reload via HTTP POST
+      - "--web.enable-lifecycle"
       - "--web.enable-admin-api"
     volumes:
       - ../../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -587,18 +481,15 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test:     ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy | grep -q Healthy"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:9090/-/healthy | grep -q Healthy",
+        ]
       interval: 10s
-      timeout:  5s
-      retries:  5
-    # prom/prometheus runs as nobody (uid 65534) — non-root ✓
+      timeout: 5s
+      retries: 5
 
-  # ===========================================================================
-  # GRAFANA — dashboards and alerting UI
-  # Memory: 256 MB
-  # Provisioned with: Prometheus + Loki + Jaeger datasources,
-  #                   StagePass Overview dashboard skeleton
-  # ===========================================================================
   grafana:
     image: grafana/grafana:10.4.3
     container_name: stagepass-grafana
@@ -609,11 +500,10 @@ services:
       - loki
       - jaeger
     environment:
-      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      GF_USERS_ALLOW_SIGN_UP:     "false"
-      GF_LOG_LEVEL:               warn
-      # Feature toggles for Loki ↔ Jaeger correlation (NFR-OBS-004)
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_LOG_LEVEL: warn
       GF_FEATURE_TOGGLES_ENABLE: "traceToMetrics,correlations"
     volumes:
       - grafana-data:/var/lib/grafana
@@ -627,17 +517,13 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test:     ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      test:
+        ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 30s
-    # grafana/grafana runs as grafana user (uid 472) — non-root ✓
 
-  # ===========================================================================
-  # LOKI — log aggregation
-  # Memory: 256 MB
-  # ===========================================================================
   loki:
     image: grafana/loki:3.0.0
     container_name: stagepass-loki
@@ -655,18 +541,13 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test:     ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q ready"]
+      test:
+        ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q ready"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 30s
-    # Loki runs as loki user — non-root ✓
 
-  # ===========================================================================
-  # PROMTAIL — log collector agent (runs on the same Docker host)
-  # Collects container logs from /var/log/docker and pushes to Loki.
-  # Memory: 64 MB
-  # ===========================================================================
   promtail:
     image: grafana/promtail:3.0.0
     container_name: stagepass-promtail
@@ -676,7 +557,6 @@ services:
       - loki
     command: -config.file=/etc/promtail/promtail-config.yaml
     volumes:
-      # Read Docker container logs from the host
       - /var/log:/var/log:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - /run/docker.sock:/run/docker.sock:ro
@@ -686,15 +566,8 @@ services:
       - observability-net
     mem_limit: 64m
     mem_reservation: 32m
-    # Promtail needs to read Docker socket — runs as root or docker group
     user: "0:0"
 
-  # ===========================================================================
-  # JAEGER ALL-IN-ONE — distributed trace collection and query
-  # Memory: 256 MB
-  # Receives traces from OTel Collector via OTLP gRPC (4317)
-  # UI accessible at http://localhost:16686
-  # ===========================================================================
   jaeger:
     image: jaegertracing/all-in-one:1.57
     container_name: stagepass-jaeger
@@ -702,31 +575,24 @@ services:
     profiles: [infra]
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
-      SPAN_STORAGE_TYPE:      memory   # In-memory for local dev; Phase 9 → Elasticsearch backend
-      MEMORY_MAX_TRACES:      50000
+      SPAN_STORAGE_TYPE: memory
+      MEMORY_MAX_TRACES: 50000
     ports:
-      - "16686:16686"   # Jaeger UI
-      - "14268:14268"   # Jaeger HTTP collector (legacy — kept for compatibility)
-      - "4317:4317"     # OTLP gRPC receiver (used by OTel Collector)
+      - "16686:16686"
+      - "14268:14268"
+      - "4317:4317"
     networks:
       - stagepass-net
       - observability-net
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test:     ["CMD-SHELL", "wget -qO- http://localhost:14269/ready | grep -q -"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/ready | grep -q -"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
       start_period: 20s
-    # Jaeger all-in-one runs as non-root ✓
 
-  # ===========================================================================
-  # OPENTELEMETRY COLLECTOR — single telemetry ingestion point
-  # Receives OTLP from all services; routes to Jaeger (traces) and
-  # Prometheus (metrics). NFR-OBS-003.
-  # Memory: 128 MB
-  # ===========================================================================
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.101.0
     container_name: stagepass-otel-collector
@@ -739,13 +605,11 @@ services:
     volumes:
       - ./config/otel/otel-collector-config.yaml:/etc/otel/otel-collector-config.yaml:ro
     ports:
-      - "4320:4317"     # OTLP gRPC — services use port 4320 on host (Jaeger uses 4317 internally)
-                        # on 4318 (HTTP) or use the collector's port on a different host mapping.
-                        # Adjusted: collector OTLP gRPC on 4320 externally to avoid conflict.
-      - "4318:4318"     # OTLP HTTP — services send traces here
-      - "8888:8888"     # OTel Collector self-metrics
-      - "8889:8889"     # Prometheus exporter endpoint
-      - "13133:13133"   # Health check
+      - "4320:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
+      - "13133:13133"
     networks:
       - stagepass-net
       - observability-net
@@ -754,17 +618,12 @@ services:
     healthcheck:
       test: ["CMD", "/otelcol-contrib", "--version"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
 
   # ===========================================================================
-  # ─── PROMETHEUS EXPORTERS ────────────────────────────────────────────────────
-  # Sidecar exporters expose /metrics for infrastructure components that
-  # do not natively speak Prometheus. One per database type for isolation.
+  # PROMETHEUS EXPORTERS
   # ===========================================================================
-
-  # postgres_exporter — one per service database for granular metrics
-  # Shared image, different DATA_SOURCE_NAME per instance
   postgres-exporter-auth:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: stagepass-pg-exporter-auth
@@ -825,7 +684,6 @@ services:
       - stagepass-net
     mem_limit: 32m
 
-  # MongoDB exporter
   mongodb-exporter:
     image: percona/mongodb_exporter:0.40.0
     container_name: stagepass-mongodb-exporter
@@ -838,7 +696,6 @@ services:
       - stagepass-net
     mem_limit: 32m
 
-  # Redis exporter
   redis-exporter:
     image: oliver006/redis_exporter:v1.60.0
     container_name: stagepass-redis-exporter
@@ -846,13 +703,12 @@ services:
     profiles: [infra]
     depends_on: [redis]
     environment:
-      REDIS_ADDR:     "redis://redis:6379"
+      REDIS_ADDR: "redis://redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD}"
     networks:
       - stagepass-net
     mem_limit: 32m
 
-  # Kafka exporter — critical for consumer group lag (NFR-REL-007 DLQ alert)
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.7.0
     container_name: stagepass-kafka-exporter
@@ -867,7 +723,6 @@ services:
       - stagepass-net
     mem_limit: 32m
 
-  # Elasticsearch exporter
   elasticsearch-exporter:
     image: prometheuscommunity/elasticsearch-exporter:v1.7.0
     container_name: stagepass-es-exporter
@@ -883,10 +738,7 @@ services:
     mem_limit: 32m
 
   # ===========================================================================
-  # ─── SONARQUBE (--profile ci) ────────────────────────────────────────────────
-  # NOT in --profile infra — see file header for rationale.
-  # Start on-demand: docker compose --profile ci up -d sonarqube
-  # Memory: ~1.2 GB (outside the infra profile budget envelope)
+  # SONARQUBE (--profile ci)
   # ===========================================================================
   sonarqube-postgres:
     image: postgres:16-alpine
@@ -894,19 +746,19 @@ services:
     restart: unless-stopped
     profiles: [ci]
     environment:
-      POSTGRES_USER:     sonar
+      POSTGRES_USER: sonar
       POSTGRES_PASSWORD: ${SONARQUBE_DB_PASSWORD}
-      POSTGRES_DB:       sonarqube
+      POSTGRES_DB: sonarqube
     volumes:
       - sonarqube-postgres-data:/var/lib/postgresql/data
     networks:
       - stagepass-net
     mem_limit: 256m
     healthcheck:
-      test:     ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
 
   sonarqube:
     image: sonarqube:10.5-community
@@ -917,17 +769,17 @@ services:
       sonarqube-postgres:
         condition: service_healthy
     environment:
-      SONAR_JDBC_URL:      "jdbc:postgresql://sonarqube-postgres:5432/sonarqube"
+      SONAR_JDBC_URL: "jdbc:postgresql://sonarqube-postgres:5432/sonarqube"
       SONAR_JDBC_USERNAME: sonar
       SONAR_JDBC_PASSWORD: ${SONARQUBE_DB_PASSWORD}
       SONAR_WEB_JAVAADDITIONALOPTS: "-Xmx512m -Xms128m"
-      SONAR_CE_JAVAADDITIONALOPTS:  "-Xmx256m -Xms64m"
+      SONAR_CE_JAVAADDITIONALOPTS: "-Xmx256m -Xms64m"
     volumes:
       - sonarqube-data:/opt/sonarqube/data
       - sonarqube-logs:/opt/sonarqube/logs
       - sonarqube-extensions:/opt/sonarqube/extensions
     ports:
-      - "9080:9000"   # SonarQube UI (9080 on host — 9000 taken by ClickHouse native)
+      - "9080:9000"
     networks:
       - stagepass-net
     mem_limit: 1024m
@@ -937,18 +789,18 @@ services:
         soft: 65536
         hard: 65536
     healthcheck:
-      test:     ["CMD-SHELL", "wget -qO- http://localhost:9000/api/system/status | grep -q UP"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:9000/api/system/status | grep -q UP",
+        ]
       interval: 30s
-      timeout:  10s
-      retries:  10
+      timeout: 10s
+      retries: 10
       start_period: 120s
 
   # ===========================================================================
   # AUTH SERVICE — Phase 3
-  # Spring Boot 3 + Java 21 — T1 service (99.9% SLO)
-  # Database: auth_db on shared postgres (auth_user — CONNECT to auth_db only)
-  # Cache:    Redis DB 0 (JTI blocklist + rate-limit counters)
-  # Memory:   512 MB (NFR §5.4 T1 allocation)
   # ===========================================================================
   auth-service:
     build:
@@ -968,15 +820,15 @@ services:
     environment:
       SERVER_PORT: 8081
       SPRING_PROFILES_ACTIVE: docker
-      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/auth_db
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/auth_db
       SPRING_DATASOURCE_USERNAME: auth_user
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_AUTH_PASSWORD}
-      SPRING_DATA_REDIS_HOST:     redis
-      SPRING_DATA_REDIS_PORT:     6379
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
       SPRING_DATA_REDIS_DATABASE: 0
       AUTH_RSA_PRIVATE_KEY: ${AUTH_RSA_PRIVATE_KEY}
-      AUTH_RSA_PUBLIC_KEY:  ${AUTH_RSA_PUBLIC_KEY}
+      AUTH_RSA_PUBLIC_KEY: ${AUTH_RSA_PUBLIC_KEY}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     networks:
       - stagepass-net
@@ -985,11 +837,8 @@ services:
 
   # ===========================================================================
   # EVENT SERVICE — Phase 3
-  # NestJS 10 + TypeScript — T2 service (99.5% SLO)
-  # Database: event_db on shared mongodb (event_user — readWrite on event_db only)
-  # Kafka:    producer on event.events topic (kafka:9092 internal listener)
-  # JWKS:     fetched from auth-service at startup — depends_on auth-service healthy
-  # Memory:   256 MB (NFR §5.4 T2 Node.js allocation)
+  # PHASE 4 CHANGE: directConnection=true added to MONGODB_URI.
+  # mongo-rs-init dependency removed — rs0 initialised by mongo-entrypoint.sh.
   # ===========================================================================
   event-service:
     build:
@@ -1009,21 +858,71 @@ services:
     ports:
       - "8082:8082"
     environment:
-      PORT:            8082
-      NODE_ENV:        docker
-      MONGODB_URI:     mongodb://event_user:${MONGO_EVENT_PASSWORD}@mongodb:27017/event_db
+      PORT: 8082
+      NODE_ENV: production
+      MONGODB_URI: mongodb://event_user:${MONGO_EVENT_PASSWORD}@mongodb:27017/event_db?directConnection=true
       MONGODB_DB_NAME: event_db
-      KAFKA_BROKERS:   kafka:9092
+      KAFKA_BROKERS: kafka:9092
       KAFKA_CLIENT_ID: event-service
-      KAFKA_GROUP_ID:  event-service-group
-      # auth-service is reachable by container name within stagepass-net
-      JWKS_URI:        http://auth-service:8081/auth/jwks
+      KAFKA_GROUP_ID: event-service-group
+      JWKS_URI: http://auth-service:8081/auth/jwks
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     networks:
       - stagepass-net
     mem_limit: 256m
     mem_reservation: 128m
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/health/live | grep -q UP"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:8082/health/live | grep -q UP",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  # ===========================================================================
+  # VENUE SERVICE — Phase 4
+  # mongo-rs-init dependency removed — rs0 initialised by mongo-entrypoint.sh.
+  # ===========================================================================
+  venue-service:
+    build:
+      context: ../../../stagepass-venue-service
+      dockerfile: Dockerfile
+    image: stagepass-venue-service:local
+    container_name: venue-service
+    restart: unless-stopped
+    profiles: [infra]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      auth-service:
+        condition: service_started
+    ports:
+      - "8083:8083"
+    environment:
+      PORT: 8083
+      NODE_ENV: production
+      KAFKA_BROKERS: kafka:9092
+      MONGODB_URI: mongodb://venue_user:${MONGO_VENUE_PASSWORD}@mongodb:27017/venue_db?directConnection=true
+      AUTH_JWKS_URI: http://auth-service:8081/auth/jwks
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: venue-service
+    networks:
+      - stagepass-net
+    mem_limit: 512m
+    mem_reservation: 256m
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:8083/health/ready | grep -q UP",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5

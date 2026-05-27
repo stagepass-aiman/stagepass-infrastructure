@@ -18,15 +18,19 @@
 #
 # ALL SERVICES ARE EXPECTED TO EXPOSE /metrics (or /actuator/prometheus for
 # Spring Boot services — configured via management.endpoints.web.exposure).
+#
+# CHANGELOG:
+#   Phase 4 — Corrected venue-service port from placeholder 3000 → 8083.
+#             Port 8083 is authoritative from venue.yaml (RULE-17).
 # =============================================================================
 
 global:
-  scrape_interval:     15s
+  scrape_interval: 15s
   evaluation_interval: 15s
-  scrape_timeout:      10s
+  scrape_timeout: 10s
   external_labels:
     environment: "local"
-    platform:    "stagepass"
+    platform: "stagepass"
 
 alerting:
   alertmanagers:
@@ -37,7 +41,6 @@ rule_files:
   - "/etc/prometheus/rules/*.yml"
 
 scrape_configs:
-
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]
@@ -52,35 +55,35 @@ scrape_configs:
       - targets: ["postgres-exporter-auth:9187"]
         labels:
           service: "auth"
-          db:      "auth_db"
+          db: "auth_db"
 
   - job_name: "postgres-seat-inventory"
     static_configs:
       - targets: ["postgres-exporter-seat:9187"]
         labels:
           service: "seat-inventory"
-          db:      "seat_inventory_db"
+          db: "seat_inventory_db"
 
   - job_name: "postgres-booking"
     static_configs:
       - targets: ["postgres-exporter-booking:9187"]
         labels:
           service: "booking"
-          db:      "booking_write_db"
+          db: "booking_write_db"
 
   - job_name: "postgres-payment"
     static_configs:
       - targets: ["postgres-exporter-payment:9187"]
         labels:
           service: "payment"
-          db:      "payment_db"
+          db: "payment_db"
 
   - job_name: "postgres-disbursement"
     static_configs:
       - targets: ["postgres-exporter-disbursement:9187"]
         labels:
           service: "disbursement"
-          db:      "disbursement_db"
+          db: "disbursement_db"
 
   - job_name: "mongodb"
     static_configs:
@@ -120,7 +123,7 @@ scrape_configs:
       - targets: ["auth-service:8081"]
         labels:
           service: "auth"
-          tier:    "t1"
+          tier: "t1"
 
   - job_name: "seat-inventory-service"
     metrics_path: /actuator/prometheus
@@ -128,7 +131,7 @@ scrape_configs:
       - targets: ["seat-inventory-service:8081"]
         labels:
           service: "seat-inventory"
-          tier:    "t1"
+          tier: "t1"
 
   - job_name: "booking-service"
     metrics_path: /actuator/prometheus
@@ -136,7 +139,7 @@ scrape_configs:
       - targets: ["booking-service:8081"]
         labels:
           service: "booking"
-          tier:    "t1"
+          tier: "t1"
 
   - job_name: "payment-service"
     metrics_path: /q/metrics
@@ -144,7 +147,7 @@ scrape_configs:
       - targets: ["payment-service:8081"]
         labels:
           service: "payment"
-          tier:    "t1"
+          tier: "t1"
 
   - job_name: "disbursement-service"
     metrics_path: /actuator/prometheus
@@ -152,7 +155,7 @@ scrape_configs:
       - targets: ["disbursement-service:8081"]
         labels:
           service: "disbursement"
-          tier:    "t1"
+          tier: "t1"
 
   # ── T2 services (Phase 3-4+) ───────────────────────────────────────────────
   - job_name: "api-gateway"
@@ -161,7 +164,7 @@ scrape_configs:
       - targets: ["api-gateway:8081"]
         labels:
           service: "api-gateway"
-          tier:    "t2"
+          tier: "t2"
 
   - job_name: "event-service"
     metrics_path: /metrics
@@ -169,15 +172,17 @@ scrape_configs:
       - targets: ["event-service:8082"]
         labels:
           service: "event"
-          tier:    "t2"
+          tier: "t2"
 
+  # RULE-17: port cross-checked against venue.yaml (authoritative source).
+  # Phase 2 placeholder was 3000 — corrected to 8083 in Phase 4.
   - job_name: "venue-service"
     metrics_path: /metrics
     static_configs:
-      - targets: ["venue-service:3000"]
+      - targets: ["venue-service:8083"]
         labels:
           service: "venue"
-          tier:    "t2"
+          tier: "t2"
 
   - job_name: "ticket-service"
     metrics_path: /metrics
@@ -185,7 +190,7 @@ scrape_configs:
       - targets: ["ticket-service:3001"]
         labels:
           service: "ticket"
-          tier:    "t2"
+          tier: "t2"
 
   - job_name: "check-in-service"
     metrics_path: /metrics
@@ -193,7 +198,7 @@ scrape_configs:
       - targets: ["check-in-service:3001"]
         labels:
           service: "check-in"
-          tier:    "t2"
+          tier: "t2"
 
   - job_name: "notification-service"
     metrics_path: /metrics
@@ -201,7 +206,7 @@ scrape_configs:
       - targets: ["notification-service:3002"]
         labels:
           service: "notification"
-          tier:    "t2"
+          tier: "t2"
 
   - job_name: "search-service"
     metrics_path: /metrics
@@ -209,7 +214,7 @@ scrape_configs:
       - targets: ["search-service:8000"]
         labels:
           service: "search"
-          tier:    "t2"
+          tier: "t2"
 
   # ── T3 services (Phase 4-5+) ───────────────────────────────────────────────
   - job_name: "waitlist-service"
@@ -218,7 +223,7 @@ scrape_configs:
       - targets: ["waitlist-service:3000"]
         labels:
           service: "waitlist"
-          tier:    "t3"
+          tier: "t3"
 
   - job_name: "recommendation-service"
     metrics_path: /metrics
@@ -226,7 +231,7 @@ scrape_configs:
       - targets: ["recommendation-service:8000"]
         labels:
           service: "recommendation"
-          tier:    "t3"
+          tier: "t3"
 
   - job_name: "chatbot-service"
     metrics_path: /metrics
@@ -234,7 +239,7 @@ scrape_configs:
       - targets: ["chatbot-service:8000"]
         labels:
           service: "chatbot"
-          tier:    "t3"
+          tier: "t3"
 
   - job_name: "fraud-detection-service"
     metrics_path: /metrics
@@ -242,7 +247,7 @@ scrape_configs:
       - targets: ["fraud-detection-service:8000"]
         labels:
           service: "fraud-detection"
-          tier:    "t3"
+          tier: "t3"
 
   - job_name: "analytics-service"
     metrics_path: /metrics
@@ -250,4 +255,4 @@ scrape_configs:
       - targets: ["analytics-service:8000"]
         labels:
           service: "analytics"
-          tier:    "t3"
+          tier: "t3"
