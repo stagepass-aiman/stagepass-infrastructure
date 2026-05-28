@@ -20,6 +20,12 @@
 # Spring Boot services — configured via management.endpoints.web.exposure).
 #
 # CHANGELOG:
+#   Phase 4 — RULE-17: corrected seat-inventory-service port from placeholder
+#             8081 → 8090. Port 8090 is the Spring Actuator management port
+#             declared in application.yml (MANAGEMENT_PORT=8090) and confirmed
+#             by the MANAGEMENT_PORT env var in docker-compose.yml.
+#             The gRPC port (9090) is never scraped — it carries no HTTP
+#             metrics endpoint. Only the Actuator HTTP port is scraped.
 #   Phase 4 — Corrected venue-service port from placeholder 3000 → 8083.
 #             Port 8083 is authoritative from venue.yaml (RULE-17).
 # =============================================================================
@@ -125,13 +131,18 @@ scrape_configs:
           service: "auth"
           tier: "t1"
 
+  # RULE-17: port cross-checked against application.yml (MANAGEMENT_PORT=8090).
+  # Seat Inventory is gRPC-only — the gRPC port (9090) carries no HTTP metrics.
+  # Only the Spring Actuator management port (8090) is scraped here.
+  # Phase 2 placeholder was 8081 — corrected to 8090 in Phase 4.
   - job_name: "seat-inventory-service"
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ["seat-inventory-service:8081"]
+      - targets: ["seat-inventory-service:8090"]
         labels:
           service: "seat-inventory"
           tier: "t1"
+          phase: "phase-4"
 
   - job_name: "booking-service"
     metrics_path: /actuator/prometheus

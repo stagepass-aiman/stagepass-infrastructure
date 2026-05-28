@@ -3,10 +3,21 @@
 #
 # Repo:    stagepass-infrastructure
 # Path:    /docker/compose/docker-compose.yml
-# Version: 0.3.0
-# Status:  Phase 4 — Venue Service Integration
+# Version: 0.4.0
+# Status:  Phase 4 — Seat Inventory Service Integration
 #
 # CHANGELOG:
+#   0.4.0 — Add seat-inventory-service (Phase 4, T1 Critical).
+#            gRPC-only service: no REST surface, no API Gateway route.
+#            gRPC port 9090 → host 19090 (host 9090 taken by Prometheus).
+#            Actuator port 8090 → host 8084 (sequential: auth=8081/event=8082/venue=8083).
+#            No Docker HEALTHCHECK — distroless base image has no shell (RULE-15).
+#            KAFKA_BROKERS: kafka:9092 — internal listener (RULE-16).
+#            OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318 (RULE-16).
+#            Redis key namespacing prevents collision with Auth Service (db 0):
+#              Auth:           jti:{id}, rate:{ip}
+#              Seat Inventory: seat:{eventId}:{seatId}, flash-hold-processed:{id}
+#            PHASE 7 TODO: evaluate allkeys-lru eviction risk for seat hold keys.
 #   0.3.0 — Replace mongo-rs-init sidecar with embedded startup script.
 #            Sidecar container with condition: service_healthy hangs
 #            permanently on Windows Docker Desktop (RULE-31). Fix: mount
@@ -927,3 +938,81 @@ services:
       timeout: 5s
       retries: 5
       start_period: 45s
+
+  # ===========================================================================
+  # SEAT INVENTORY SERVICE — Phase 4
+  #
+  # T1 Critical — correctness gate for all seat holds and bookings.
+  #
+  # gRPC-only service (ADR-003 §3.3.1): no REST surface, no API Gateway route.
+  # Two-store architecture (ADR-006 §3.1):
+  #   Redis Lua SETNX — atomic seat hold mutual exclusion (NFR-PERF-001: p99 < 500ms)
+  #   PostgreSQL SERIALIZABLE — durable commit, CommitSeats only (NFR-REL-008)
+  #
+  # Interfaces:
+  #   gRPC  container:9090 → host:19090  (Booking Service only; K8s NetworkPolicy)
+  #   HTTP  container:8090 → host:8084   (Spring Actuator: health + /metrics only)
+  #
+  # Port decisions:
+  #   host 9090 is taken by Prometheus → gRPC mapped to host 19090.
+  #   host 8084 continues the sequential Actuator port series:
+  #     auth=8081, event=8082, venue=8083, seat-inventory=8084.
+  #
+  # No Docker HEALTHCHECK — distroless base image has no shell (RULE-15).
+  # Verify liveness from host: curl http://localhost:8084/actuator/health/liveness
+  #
+  # Redis: shared stagepass-redis (database 0, default).
+  # Key namespacing prevents collision with Auth Service:
+  #   Auth:           jti:{id}, rate:{ip}
+  #   Seat Inventory: seat:{eventId}:{seatId}, flash-hold-processed:{id}
+  # PHASE 7 TODO: evaluate allkeys-lru eviction risk for seat hold keys.
+  #   If Redis memory pressure causes seat hold key eviction before TTL,
+  #   the hold is silently released. Mitigations: (a) reserved-memory-percent,
+  #   (b) volatile-lru + explicit EXPIRE on all keys,
+  #   (c) dedicated Redis instance for Seat Inventory.
+  # ===========================================================================
+  seat-inventory-service:
+    build:
+      context: ../../../stagepass-seat-inventory-service
+      dockerfile: Dockerfile
+    image: stagepass-seat-inventory-service:local
+    container_name: seat-inventory-service
+    restart: unless-stopped
+    profiles: [infra]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "19090:9090" # gRPC — Booking Service consumer (host 9090 taken by Prometheus)
+      - "8084:8090" # Spring Actuator — health probes + Prometheus scrape
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      # PostgreSQL — seat_inventory_db created by init/postgres/01-init-databases.sh
+      SEAT_INVENTORY_DB_URL: jdbc:postgresql://postgres:5432/seat_inventory_db
+      SEAT_INVENTORY_DB_USER: seat_user
+      SEAT_INVENTORY_DB_PASSWORD: ${POSTGRES_SEAT_PASSWORD}
+      # Redis — shared stagepass-redis; key-namespaced to avoid collision with Auth
+      SEAT_INVENTORY_REDIS_HOST: redis
+      SEAT_INVENTORY_REDIS_PORT: 6379
+      SEAT_INVENTORY_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # Kafka — internal listener only (RULE-16: never localhost:9092 inside Docker)
+      KAFKA_BROKERS: kafka:9092
+      # Ports — override defaults declared in application.yml
+      MANAGEMENT_PORT: 8090 # Spring server.port (Actuator HTTP)
+      GRPC_PORT: 9090 # grpc.server.port (gRPC Netty)
+      # Observability — RULE-16: collector reachable by container name, not localhost
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: seat-inventory-service
+    networks:
+      - stagepass-net
+    mem_limit: 512m
+    mem_reservation: 256m
+    # No healthcheck — distroless image has no shell (RULE-15).
+    # Kubernetes liveness/readiness probes target Actuator HTTP from outside.
+    # Local verification: curl -s http://localhost:8084/actuator/health/readiness
