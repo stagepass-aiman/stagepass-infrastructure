@@ -7,6 +7,10 @@
 #
 # CHANGELOG:
 #   Phase 4 — Added venue.events and venue.events.dlq (Venue Service Outbox).
+#   Phase 4 — Added seat.state-changes (6 partitions, already existed —
+#              retained with correct partition count), flash-sale.hold-requests,
+#              flash-sale.hold-results, and their .dlq counterparts
+#              (Seat Inventory Service + ADR-007 flash sale queue pattern).
 # =============================================================================
 set -euo pipefail
 
@@ -131,6 +135,84 @@ kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
   --replication-factor 1 \
   --config retention.ms=1209600000   # 14 days
 
+# ── Seat Inventory Service topics (Phase 4) ──────────────────────────────────
+# seat.state-changes — published by Seat Inventory Service via Outbox on every
+# individual seat state transition (AVAILABLE↔HELD↔BOOKED↔BLOCKED).
+# Partition key: eventId — all state changes for one event land on the same
+# partition. Required for ordered real-time seat map delivery (NFR-PERF-005:
+# p99 < 1s from state change to WebSocket push).
+# Consumer groups: notification-service-consumer (WebSocket push),
+#                  search-service-consumer (index update),
+#                  analytics-service-consumer (ClickHouse).
+# NOTE: seat.state-changes is also created via create_topic above (6 partitions,
+# 1-day retention). That entry is kept for backward compatibility. Both calls
+# use --if-not-exists so the second is a no-op if the topic already exists.
+# The retention value above (86400000 = 1 day) is authoritative for local dev.
+# Production uses 7 days (604800000) per seat_async.yaml.
+
+# seat.state-changes.dlq is created automatically by the create_topic call
+# above. Explicit DLQ creation below is for documentation clarity only
+# and is also idempotent via --if-not-exists.
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "seat.state-changes.dlq" \
+  --partitions 1 \
+  --replication-factor 1 \
+  --config retention.ms=1209600000   # 14 days — already created by create_topic; idempotent
+
+# flash-sale.hold-requests — published by Booking Service when flash sale mode
+# is active for an event (GET flash-sale:mode:{eventId} = "active" from Redis).
+# Consumed by: seat-inventory-service-consumer (ADR-007 §3.3).
+# Partition key: eventId — FIFO ordering per event is the fairness guarantee.
+# All requests for one event are serialised on one partition; customers are
+# served in the order they submitted their bookings (ADR-007 §3.4).
+# 6 partitions (local dev): production uses 24. Supports 6 concurrent flash
+# sale events simultaneously without cross-event interference.
+# 1 day retention: flash sale requests are time-bounded by expiresAt field
+# (hold TTL = 600s). Requests older than 1 day are guaranteed expired.
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "flash-sale.hold-requests" \
+  --partitions 6 \
+  --replication-factor 1 \
+  --config retention.ms=86400000     # 1 day
+
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "flash-sale.hold-requests.dlq" \
+  --partitions 1 \
+  --replication-factor 1 \
+  --config retention.ms=1209600000   # 14 days — P0 alert during active flash sale (NFR-REL-007)
+
+# flash-sale.hold-results — published by Seat Inventory Service after executing
+# (or choosing not to execute) the Redis Lua hold script for each request.
+# Consumed by: booking-service-consumer (saga advancement — PENDING → SEATS_HELD
+# or PENDING → CANCELLED), notification-service-consumer (WebSocket push to
+# customer: hold-granted / hold-denied / hold-expired).
+# Partition key: customerId — avoids hotspot on popular eventIds; enables
+# ordered delivery per customer so hold-granted always arrives before
+# booking-confirmed for the same customer.
+# 6 partitions (local dev): production uses 12.
+# 1 day retention: results are consumed and acted on within seconds.
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "flash-sale.hold-results" \
+  --partitions 6 \
+  --replication-factor 1 \
+  --config retention.ms=86400000     # 1 day
+
+kafka-topics --bootstrap-server ${KAFKA_BOOTSTRAP} \
+  --command-config /tmp/admin.properties \
+  --create --if-not-exists \
+  --topic "flash-sale.hold-results.dlq" \
+  --partitions 1 \
+  --replication-factor 1 \
+  --config retention.ms=1209600000   # 14 days — P0 alert during active flash sale (NFR-REL-007)
+
 echo "[kafka-init] All topics created."
-echo "[kafka-init] Phase 4 init complete."
+echo "[kafka-init] Phase 4 (Seat Inventory) init complete."
 echo "[kafka-init] NOTE: SASL/SCRAM deferred to Phase 3. THR-PLAT-01 tracked."
