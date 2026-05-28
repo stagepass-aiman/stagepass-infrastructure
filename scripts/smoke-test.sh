@@ -98,7 +98,8 @@ SI_READY=$(curl -sf "$SEAT_ACTUATOR_URL/actuator/health/readiness" \
 pass "Seat Inventory readiness UP (PostgreSQL + Redis connected)"
 
 info "Checking Seat Inventory gRPC port is open ($SEAT_GRPC_HOST:$SEAT_GRPC_PORT)..."
-nc -z "$SEAT_GRPC_HOST" "$SEAT_GRPC_PORT" 2>/dev/null || \
+# Use /dev/tcp instead of nc — nc is not available on Windows Git Bash (RULE-22 equivalent)
+(echo >/dev/tcp/${SEAT_GRPC_HOST}/${SEAT_GRPC_PORT}) 2>/dev/null || \
   fail "Seat Inventory gRPC port $SEAT_GRPC_PORT not open — service may not have started correctly"
 pass "Seat Inventory gRPC port $SEAT_GRPC_PORT open"
 
