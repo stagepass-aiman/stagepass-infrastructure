@@ -840,7 +840,9 @@ services:
       SPRING_DATA_REDIS_DATABASE: 0
       AUTH_RSA_PRIVATE_KEY: ${AUTH_RSA_PRIVATE_KEY}
       AUTH_RSA_PUBLIC_KEY: ${AUTH_RSA_PUBLIC_KEY}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      MANAGEMENT_OTLP_TRACING_ENDPOINT: http://otel-collector:4318/v1/traces
+      OTEL_SERVICE_NAME: auth-service
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
     networks:
       - stagepass-net
     mem_limit: 512m
@@ -878,6 +880,7 @@ services:
       KAFKA_GROUP_ID: event-service-group
       JWKS_URI: http://auth-service:8081/auth/jwks
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_SERVICE_NAME: event-service
     networks:
       - stagepass-net
     mem_limit: 256m
