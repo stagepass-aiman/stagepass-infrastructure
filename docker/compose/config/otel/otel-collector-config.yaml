@@ -42,8 +42,8 @@ processors:
   # Soft limit: start dropping at 75% of max; hard limit: 80%.
   memory_limiter:
     check_interval: 1s
-    limit_mib: 200       # 200 MB hard limit — consistent with 256 MB container budget
-    spike_limit_mib: 40  # Allow 40 MB burst above steady state
+    limit_mib: 200 # 200 MB hard limit — consistent with 256 MB container budget
+    spike_limit_mib: 40 # Allow 40 MB burst above steady state
 
   # Batch processor: accumulates spans/metrics before exporting.
   # Reduces Jaeger write pressure. Timeout of 1s balances latency vs throughput.
@@ -74,8 +74,6 @@ exporters:
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: "stagepass"
-    resource_to_telemetry_conversion:
-      enabled: true
 
   # Debug exporter — logs sampled telemetry to stdout.
   # Useful during Phase 2–3 bring-up. Disable in Phase 7+ to reduce noise.
@@ -88,13 +86,13 @@ service:
   extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
-      receivers:  [otlp]
+      receivers: [otlp]
       processors: [memory_limiter, resource, batch]
-      exporters:  [otlp/jaeger, debug]
+      exporters: [otlp/jaeger, debug]
     metrics:
-      receivers:  [otlp, prometheus]
+      receivers: [otlp, prometheus]
       processors: [memory_limiter, resource, batch]
-      exporters:  [prometheus]
+      exporters: [prometheus]
 
 extensions:
   health_check:
