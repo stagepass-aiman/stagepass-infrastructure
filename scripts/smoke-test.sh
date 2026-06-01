@@ -13,6 +13,8 @@
 #   7. Use JWT to create a Draft event
 #   8. Verify the event is retrievable
 #   9. Add a pricing tier, add a section
+#   9a. Verify pricing tier money wire-format: string amount, no $numberDecimal  ← issue #5
+#   9b. Verify money round-trip on GET + event summary shape (no embedded subdocs) ← issue #5
 #  10. Publish the event → Kafka message emitted
 #  11. Verify Kafka topic has a message (via kafka-console-consumer)
 #  12. Register a Venue actor → create a Venue
@@ -181,6 +183,29 @@ TIER_ID=$(echo "$TIER_RESPONSE" | jq -r '.tierId' 2>/dev/null || echo "")
 [ -n "$TIER_ID" ] && [ "$TIER_ID" != "null" ] || fail "Pricing tier did not return tierId"
 pass "Pricing tier added (id=$TIER_ID)"
 
+# ── 9a. Verify money wire-format on the pricing tier POST response ─────────
+# Issue #5 / ADR-004 §3.3, §3.4.2: money MUST serialise as a nested object
+#   { "amount": "500.0000", "currency": "INR" }
+# with amount as a JSON STRING — NEVER MongoDB Extended JSON
+#   { "$numberDecimal": "500.0000" }
+# which is what a raw Decimal128 produces when it reaches JSON.stringify.
+info "Verifying pricing tier money wire-format (issue #5)..."
+# set -euo pipefail safe: use `if ... then`, not `grep && fail` (a no-match must
+# not abort the script).
+if echo "$TIER_RESPONSE" | grep -qF '$numberDecimal'; then
+  fail "Pricing tier response contains \$numberDecimal — money wire-format violation (ADR-004 §3.4.2)"
+fi
+TIER_AMOUNT_TYPE=$(echo "$TIER_RESPONSE" | jq -r '.price.amount | type' 2>/dev/null || echo "FAIL")
+TIER_AMOUNT=$(echo "$TIER_RESPONSE" | jq -r '.price.amount' 2>/dev/null || echo "")
+TIER_CURRENCY=$(echo "$TIER_RESPONSE" | jq -r '.price.currency' 2>/dev/null || echo "")
+[ "$TIER_AMOUNT_TYPE" = "string" ] || \
+  fail "price.amount is not a JSON string (jq type=$TIER_AMOUNT_TYPE) — wire-format violation"
+[ "$TIER_AMOUNT" = "500.0000" ] || \
+  fail "price.amount wrong (got: '$TIER_AMOUNT', expected '500.0000')"
+[ "$TIER_CURRENCY" = "INR" ] || \
+  fail "price.currency wrong (got: '$TIER_CURRENCY', expected 'INR')"
+pass "Pricing tier money is a string Money object (amount=\"$TIER_AMOUNT\" $TIER_CURRENCY, no \$numberDecimal)"
+
 info "Adding a seating section..."
 SECTION_RESPONSE=$(curl -sf -X POST "$EVENT_URL/events/$EVENT_ID/sections" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -196,6 +221,48 @@ SECTION_RESPONSE=$(curl -sf -X POST "$EVENT_URL/events/$EVENT_ID/sections" \
 SECTION_ID=$(echo "$SECTION_RESPONSE" | jq -r '.sectionId' 2>/dev/null || echo "")
 [ -n "$SECTION_ID" ] && [ "$SECTION_ID" != "null" ] || fail "Section did not return sectionId"
 pass "Section added (id=$SECTION_ID)"
+
+# ── 9b. Verify money round-trip on read + event summary shape (issue #5) ──
+# (a) GET pricing-tiers must return the same string Money object on read-back
+#     (proves the Decimal128 -> string conversion is on the READ path, not just
+#     echoing the request).
+# (b) GET /events/:id is the spec Event SUMMARY (event.yaml). It must NOT embed
+#     pricingTiers or sections (those are sub-resources), and must not leak
+#     MongoDB internals (_id/__v). This also means no Decimal128 can appear in
+#     the event response at all.
+info "Verifying money round-trip on GET pricing-tiers..."
+TIERS_GET=$(curl -sf "$EVENT_URL/events/$EVENT_ID/pricing-tiers" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" 2>/dev/null) || fail "GET pricing-tiers request failed"
+if echo "$TIERS_GET" | grep -qF '$numberDecimal'; then
+  fail "GET pricing-tiers contains \$numberDecimal — money wire-format violation on read path"
+fi
+GET_AMOUNT_TYPE=$(echo "$TIERS_GET" | jq -r '.items[0].price.amount | type' 2>/dev/null || echo "FAIL")
+GET_AMOUNT=$(echo "$TIERS_GET" | jq -r '.items[0].price.amount' 2>/dev/null || echo "")
+[ "$GET_AMOUNT_TYPE" = "string" ] || \
+  fail "GET pricing-tiers price.amount is not a JSON string (type=$GET_AMOUNT_TYPE)"
+[ "$GET_AMOUNT" = "500.0000" ] || \
+  fail "GET pricing-tiers price.amount wrong (got: '$GET_AMOUNT', expected '500.0000')"
+pass "Money round-trips losslessly on read (GET price.amount=\"$GET_AMOUNT\")"
+
+info "Verifying event summary shape (no embedded sub-resources or Mongo internals)..."
+EVENT_GET=$(curl -sf "$EVENT_URL/events/$EVENT_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" 2>/dev/null) || fail "GET event request failed"
+if echo "$EVENT_GET" | grep -qF '$numberDecimal'; then
+  fail "GET event contains \$numberDecimal — embedded tier money leaked into the event summary"
+fi
+HAS_TIERS=$(echo "$EVENT_GET" | jq -r 'has("pricingTiers")' 2>/dev/null || echo "FAIL")
+HAS_SECTIONS=$(echo "$EVENT_GET" | jq -r 'has("sections")' 2>/dev/null || echo "FAIL")
+HAS_ID=$(echo "$EVENT_GET" | jq -r 'has("_id")' 2>/dev/null || echo "FAIL")
+HAS_V=$(echo "$EVENT_GET" | jq -r 'has("__v")' 2>/dev/null || echo "FAIL")
+[ "$HAS_TIERS" = "false" ] || \
+  fail "GET event leaks embedded 'pricingTiers' — not part of the Event summary contract (event.yaml)"
+[ "$HAS_SECTIONS" = "false" ] || \
+  fail "GET event leaks embedded 'sections' — not part of the Event summary contract (event.yaml)"
+[ "$HAS_ID" = "false" ] || \
+  fail "GET event leaks MongoDB '_id' — persistence internal must not be exposed"
+[ "$HAS_V" = "false" ] || \
+  fail "GET event leaks Mongoose '__v' — persistence internal must not be exposed"
+pass "Event summary shape correct (no pricingTiers/sections/_id/__v)"
 
 # ── 10. Publish the event ─────────────────────────────────────────────────
 info "Publishing the event..."
